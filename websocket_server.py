@@ -7,6 +7,7 @@ import html
 import time
 import hashlib
 import os
+import http # <--- Добавили импорт для ответов на проверки
 
 # --- КОНФИГУРАЦИЯ ---
 DB_NAME = "chat_v9_deploy.db"
@@ -21,7 +22,6 @@ class Database:
         self.init_db()
 
     def init_db(self):
-        # 1. Пользователи
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 username TEXT PRIMARY KEY,
@@ -31,7 +31,6 @@ class Database:
                 created_at REAL
             )
         ''')
-        # 2. Комнаты
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS rooms (
                 name TEXT PRIMARY KEY,
@@ -41,7 +40,6 @@ class Database:
                 created_at REAL
             )
         ''')
-        # 3. Баны
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS bans (
                 room_name TEXT,
@@ -49,7 +47,6 @@ class Database:
                 PRIMARY KEY (room_name, username)
             )
         ''')
-        # 4. Сообщения
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,7 +63,6 @@ class Database:
                 timestamp REAL
             )
         ''')
-        # 5. Реакции
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS reactions (
                 message_id INTEGER,
@@ -75,7 +71,6 @@ class Database:
                 PRIMARY KEY (message_id, sender, emoji)
             )
         ''')
-        # 6. Голоса
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS votes (
                 message_id INTEGER,
@@ -86,7 +81,6 @@ class Database:
         ''')
         self.conn.commit()
 
-    # --- AUTH ---
     def register_user(self, username, password):
         try:
             phash = hashlib.sha256(password.encode()).hexdigest()
@@ -119,7 +113,6 @@ class Database:
         ''', (username, username))
         return [row['c'] for row in self.cursor.fetchall()]
 
-    # --- ROOMS ---
     def create_room(self, name, creator, rtype):
         try:
             self.cursor.execute("INSERT INTO rooms (name, creator, type, created_at) VALUES (?, ?, ?, ?)", 
@@ -153,25 +146,18 @@ class Database:
         self.cursor.execute("SELECT 1 FROM bans WHERE room_name=? AND username=?", (room_name, username))
         return self.cursor.fetchone() is not None
 
-    # --- MESSAGES ---
     def save_message(self, data):
         context = 'room' if 'room_name' in data else 'pm'
         target = data.get('room_name') if context == 'room' else data.get('recipient')
         reply_json = json.dumps(data.get("replyTo")) if data.get("replyTo") else None
         ts = data.get('timestamp', time.time())
-        
         media = data.get("data")
         if data.get("type") == "poll":
             media = json.dumps(data.get("options"))
-
         self.cursor.execute('''
             INSERT INTO messages (target, context, sender, mtype, text, media_data, filename, reply_to_json, timestamp)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            target, context, data.get("sender"), data.get("type"), 
-            data.get("text"), media, data.get("filename"), 
-            reply_json, ts
-        ))
+        ''', (target, context, data.get("sender"), data.get("type"), data.get("text"), media, data.get("filename"), reply_json, ts))
         self.conn.commit()
         return self.cursor.lastrowid
 
@@ -201,50 +187,36 @@ class Database:
     def get_history(self, context, target, viewer, limit=100):
         query = "SELECT * FROM messages WHERE context=? AND "
         params = [context]
-        
         if context == 'room':
             query += "target = ?"
             params.append(target)
         else:
             query += "((sender = ? AND target = ?) OR (sender = ? AND target = ?))"
             params.extend([viewer, target, target, viewer])
-
         query += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
-        
         self.cursor.execute(query, tuple(params))
         rows = self.cursor.fetchall()
         history = []
-        
         for row in reversed(rows):
             msg_id = row['id']
             reactions = self.get_reactions(msg_id)
             sender_info = self.get_user_info(row["sender"])
-            
             msg_obj = {
-                "id": msg_id,
-                "type": row["mtype"],
-                "sender": row["sender"],
+                "id": msg_id, "type": row["mtype"], "sender": row["sender"],
                 "sender_avatar": sender_info['avatar'] if sender_info else None,
-                "text": row["text"],
-                "data": row["media_data"],
-                "filename": row["filename"],
-                "timestamp": row["timestamp"],
-                "is_edited": row["is_edited"],
-                "is_read": row["is_read"],
+                "text": row["text"], "data": row["media_data"], "filename": row["filename"],
+                "timestamp": row["timestamp"], "is_edited": row["is_edited"], "is_read": row["is_read"],
                 "replyTo": json.loads(row["reply_to_json"]) if row["reply_to_json"] else None,
                 "reactions": reactions
             }
             if row["mtype"] == "poll":
                 msg_obj["poll_results"] = self.get_poll_results(msg_id)
-
             history.append(msg_obj)
         return history
 
-    # --- VOTES & REACTIONS ---
     def vote_poll(self, msg_id, username, option_index):
-        self.cursor.execute("REPLACE INTO votes (message_id, username, option_index) VALUES (?, ?, ?)", 
-                            (msg_id, username, option_index))
+        self.cursor.execute("REPLACE INTO votes (message_id, username, option_index) VALUES (?, ?, ?)", (msg_id, username, option_index))
         self.conn.commit()
         return self.get_poll_results(msg_id)
 
@@ -275,7 +247,6 @@ class Database:
             result[emoji].append(row['sender'])
         return result
 
-
 class ChatServer:
     def __init__(self):
         self.clients = {}
@@ -302,28 +273,17 @@ class ChatServer:
                 processed.add(contact_nick)
                 u_info = self.db.get_user_info(contact_nick)
                 if u_info:
-                    final_list.append({
-                        "nick": contact_nick,
-                        "avatar": u_info['avatar'],
-                        "bio": u_info['bio'],
-                        "online": contact_nick in online_users
-                    })
+                    final_list.append({"nick": contact_nick, "avatar": u_info['avatar'], "bio": u_info['bio'], "online": contact_nick in online_users})
             for on_user in online_users:
                 if on_user not in processed and on_user != user:
                     u_info = self.db.get_user_info(on_user)
                     if u_info:
-                        final_list.append({
-                            "nick": on_user,
-                            "avatar": u_info['avatar'],
-                            "bio": u_info['bio'],
-                            "online": True
-                        })
+                        final_list.append({"nick": on_user, "avatar": u_info['avatar'], "bio": u_info['bio'], "online": True})
             await ws.send(json.dumps({"type": "contacts_list", "users": final_list}))
 
     async def handler(self, websocket):
         nick = None
         try:
-            # AUTH
             msg_str = await asyncio.wait_for(websocket.recv(), timeout=60)
             auth_data = json.loads(msg_str)
             
@@ -346,12 +306,7 @@ class ChatServer:
                          return
                     
                     profile = self.db.get_user_info(username)
-                    await websocket.send(json.dumps({
-                        "type": "auth_success", 
-                        "nick": username, 
-                        "avatar": profile['avatar'], 
-                        "bio": profile['bio']
-                    }))
+                    await websocket.send(json.dumps({"type": "auth_success", "nick": username, "avatar": profile['avatar'], "bio": profile['bio']}))
                     nick = username
                     self.clients[nick] = websocket
                     print(f"[+] {nick} connected")
@@ -364,7 +319,6 @@ class ChatServer:
             await websocket.send(json.dumps({"type": "rooms_list", "rooms": self.db.get_rooms()}))
             await self.broadcast_presence()
 
-            # MAIN LOOP
             async for message_str in websocket:
                 data = json.loads(message_str)
                 mtype = data.get("type")
@@ -384,9 +338,7 @@ class ChatServer:
                     data['sender_avatar'] = u_info['avatar'] if u_info else None
                     data['is_read'] = 0
                     data['is_edited'] = 0
-
                     if mtype == "poll": data['poll_results'] = {}
-
                     msg_id = self.db.save_message(data)
                     data['id'] = msg_id
                     data['reactions'] = {}
@@ -396,11 +348,9 @@ class ChatServer:
                         await self.send_to_user(data['recipient'], data)
                         await websocket.send(json.dumps(data))
 
-                # --- POLL VOTE ---
                 elif mtype == "vote_poll":
                     results = self.db.vote_poll(data['message_id'], nick, data['option_index'])
                     update = {"type": "poll_update", "id": data['message_id'], "results": results}
-                    
                     if 'room_name' in data: await self.broadcast(update)
                     elif 'recipient' in data:
                         sender = self.db.get_message(data['message_id'])['sender']
@@ -408,14 +358,8 @@ class ChatServer:
                         await self.send_to_user(data['recipient'], update)
                         await websocket.send(json.dumps(update))
 
-                # --- WEBRTC SIGNALING ---
                 elif mtype == "signal":
-                    payload = {
-                        "type": "signal",
-                        "sender": nick,
-                        "sender_avatar": self.db.get_user_info(nick)['avatar'],
-                        "data": data['data']
-                    }
+                    payload = {"type": "signal", "sender": nick, "sender_avatar": self.db.get_user_info(nick)['avatar'], "data": data['data']}
                     if 'room_name' in data:
                         payload['room_name'] = data['room_name']
                         await self.broadcast(payload, exclude=websocket)
@@ -504,14 +448,26 @@ class ChatServer:
             await self.broadcast_presence()
             print(f"[-] {nick} disconnected")
 
+# --- ОБРАБОТКА HEALTH CHECK ---
+async def health_check(connection, request):
+    # Если Render спрашивает "Ты жив?" по пути /healthz
+    if request.path == "/healthz":
+        # Отвечаем 200 OK (вместо попытки начать WebSocket)
+        return connection.respond(http.HTTPStatus.OK, "OK")
+
 async def main(host, port):
     server = ChatServer()
     print(f"🚀 NEOCHAT DEPLOY SERVER running on {host}:{port}")
-    async with websockets.serve(server.handler, host, port, max_size=MAX_MEDIA_SIZE):
+    # Добавляем process_request для обработки проверок от Render
+    async with websockets.serve(
+        server.handler, 
+        host, 
+        port, 
+        max_size=MAX_MEDIA_SIZE,
+        process_request=health_check
+    ):
         await asyncio.Future()
 
 if __name__ == "__main__":
-    # Получаем порт от Render или используем 5001 для локального теста
     port = int(os.environ.get("PORT", 5001))
-    # Слушаем 0.0.0.0 (все внешние подключения), а не только localhost
     asyncio.run(main("0.0.0.0", port))
